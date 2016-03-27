@@ -18,6 +18,7 @@ import (
 	"os"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/ec2"
 	"github.com/aws/amazon-ecs-agent/agent/ec2/mocks"
@@ -84,8 +85,9 @@ func TestEnvironmentConfig(t *testing.T) {
 	os.Setenv("ECS_SELINUX_CAPABLE", "true")
 	os.Setenv("ECS_APPARMOR_CAPABLE", "true")
 	os.Setenv("ECS_DISABLE_PRIVILEGED", "true")
+	os.Setenv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION", "90s")
 
-	conf := EnvironmentConfig()
+	conf := environmentConfig()
 	if conf.Cluster != "myCluster" {
 		t.Error("Wrong value for cluster ", conf.Cluster)
 	}
@@ -109,6 +111,9 @@ func TestEnvironmentConfig(t *testing.T) {
 	}
 	if !conf.AppArmorCapable {
 		t.Error("Wrong value for AppArmorCapable")
+	}
+	if conf.TaskCleanupWaitDuration != (90 * time.Second) {
+		t.Error("Wrong value for TaskCleanupWaitDuration")
 	}
 }
 
@@ -150,7 +155,16 @@ func TestConfigBoolean(t *testing.T) {
 }
 
 func TestConfigDefault(t *testing.T) {
-	cfg := DefaultConfig()
+	os.Unsetenv("ECS_DISABLE_METRICS")
+	os.Unsetenv("ECS_RESERVED_PORTS")
+	os.Unsetenv("ECS_RESERVED_MEMORY")
+	os.Unsetenv("ECS_DISABLE_PRIVILEGED")
+	os.Unsetenv("ECS_AVAILABLE_LOGGING_DRIVERS")
+	os.Unsetenv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION")
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if cfg.DockerEndpoint != "unix:///var/run/docker.sock" {
 		t.Error("Default docker endpoint set incorrectly")
 	}
@@ -158,7 +172,7 @@ func TestConfigDefault(t *testing.T) {
 		t.Error("Default datadir set incorrectly")
 	}
 	if cfg.DisableMetrics {
-		t.Error("Default disablemetrics set incorrectly")
+		t.Errorf("Default disablemetrics set incorrectly: %v", cfg.DisableMetrics)
 	}
 	if len(cfg.ReservedPorts) != 4 {
 		t.Error("Default resered ports set incorrectly")
@@ -167,20 +181,23 @@ func TestConfigDefault(t *testing.T) {
 		t.Error("Default docker graph path set incorrectly")
 	}
 	if cfg.ReservedMemory != 0 {
-		t.Error("Default reserved memory set incorrectly")
+		t.Errorf("Default reserved memory set incorrectly: %v", cfg.ReservedMemory)
 	}
 	if cfg.PrivilegedDisabled {
-		t.Error("Default PrivilegedDisabled set incorrectly")
+		t.Errorf("Default PrivilegedDisabled set incorrectly: %v", cfg.PrivilegedDisabled)
 	}
 	if !reflect.DeepEqual(cfg.AvailableLoggingDrivers, []dockerclient.LoggingDriver{dockerclient.JsonFileDriver}) {
-		t.Error("Default logging drivers set incorrectly")
+		t.Errorf("Default logging drivers set incorrectly: %v", cfg.AvailableLoggingDrivers)
+	}
+	if cfg.TaskCleanupWaitDuration != 3*time.Hour {
+		t.Errorf("Defualt task cleanup wait duration set incorrectly: %v", cfg.TaskCleanupWaitDuration)
 	}
 }
 
 func TestBadLoggingDriverSerialization(t *testing.T) {
 	os.Setenv("ECS_AVAILABLE_LOGGING_DRIVERS", "[\"malformed]")
 
-	conf := EnvironmentConfig()
+	conf := environmentConfig()
 	if len(conf.AvailableLoggingDrivers) != 0 {
 		t.Error("Wrong value for AvailableLoggingDrivers", conf.AvailableLoggingDrivers)
 	}
@@ -194,5 +211,93 @@ func TestInvalidLoggingDriver(t *testing.T) {
 	err := conf.validate()
 	if err == nil {
 		t.Error("Should be error with invalid-logging-driver")
+	}
+}
+
+func TestInvalidFormatParseEnvVariableUint16(t *testing.T) {
+	os.Setenv("FOO", "foo")
+	var16 := parseEnvVariableUint16("FOO")
+	if var16 != 0 {
+		t.Error("Expected 0 from parseEnvVariableUint16 for invalid Uint16 format")
+	}
+}
+
+func TestValidFormatParseEnvVariableUint16(t *testing.T) {
+	os.Setenv("FOO", "1")
+	var16 := parseEnvVariableUint16("FOO")
+	if var16 != 1 {
+		t.Errorf("Unexpected value parsed in parseEnvVariableUint16. Expected %d, got %d", 1, var16)
+	}
+}
+
+func TestInvalidFormatParseEnvVariableDuration(t *testing.T) {
+	os.Setenv("FOO", "foo")
+	duration := parseEnvVariableDuration("FOO")
+	if duration != 0 {
+		t.Error("Expected 0 from parseEnvVariableDuration for invalid format")
+	}
+}
+
+func TestValidFormatParseEnvVariableDuration(t *testing.T) {
+	os.Setenv("FOO", "1s")
+	duration := parseEnvVariableDuration("FOO")
+	if duration != 1*time.Second {
+		t.Errorf("Unexpected value parsed in parseEnvVariableDuration. Expected %v, got %v", 1*time.Second, duration)
+	}
+}
+
+func TestInvalidTaskCleanupTimeout(t *testing.T) {
+	os.Setenv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION", "1s")
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// If an invalid value is set, the config should pick up the default value for
+	// cleaning up the task.
+	if cfg.TaskCleanupWaitDuration != 3*time.Hour {
+		t.Error("Defualt task cleanup wait duration set incorrectly")
+	}
+}
+
+func TestTaskCleanupTimeout(t *testing.T) {
+	os.Setenv("ECS_ENGINE_TASK_CLEANUP_WAIT_DURATION", "10m")
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// If an invalid value is set, the config should pick up the default value for
+	// cleaning up the task.
+	if cfg.TaskCleanupWaitDuration != 10*time.Minute {
+		t.Errorf("Task cleanup wait duration set incorrectly. Expected %v, got %v", 10*time.Minute, cfg.TaskCleanupWaitDuration)
+	}
+}
+
+func TestInvalidReservedMemory(t *testing.T) {
+	os.Setenv("ECS_RESERVED_MEMORY", "-1")
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// If an invalid value is set, the config should pick up the default value for
+	// reserved memory, which is 0.
+	if cfg.ReservedMemory != 0 {
+		t.Error("Wrong value for ReservedMemory", cfg.ReservedMemory)
+	}
+}
+
+func TestReservedMemory(t *testing.T) {
+	os.Setenv("ECS_RESERVED_MEMORY", "1")
+	cfg, err := NewConfig(ec2.NewBlackholeEC2MetadataClient())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// If an invalid value is set, the config should pick up the default value for
+	// reserved memory, which is 0.
+	if cfg.ReservedMemory != 1 {
+		t.Errorf("Wrong value for ReservedMemory. Expected %d, got %d", 1, cfg.ReservedMemory)
 	}
 }

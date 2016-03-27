@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.8.1
+* Bug - Fixed a potential deadlock in docker_task_engine.
+
+## 1.8.0
+* Feature - Task cleanup wait time is now configurable.
+* Enhancement - Improved testing for HTTP handler tests.
+* Enhancement - Updated AWS SDK to v.1.0.11.
+* Bug - Fixed a race condition in a docker-task-engine test.
+* Bug - Fixed an issue where dockerID was not persisted in the case of an
+  error.
+
+## 1.7.1
+* Enhancement - Increase `docker inspect` timeout to improve reliability under
+  some workloads.
+* Enhancement - Increase connect timeout for websockets to improve reliability
+  under some workloads.
+* Bug - Fixed memory leak in telemetry ticker loop.
+
+## 1.7.0
+* Feature - Add support for pulling from Amazon EC2 Container Registry.
+* Bug - Resolved an issue where containers could be incorrectly assumed stopped
+  when an OOM event was emitted by Docker.
+* Bug - Fixed an issue where a crash could cause recently-created containers to
+  become untracked.
+
 ## 1.6.0
 
 * Feature - Add experimental HTTP proxy support.

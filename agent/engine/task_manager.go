@@ -18,12 +18,13 @@ import (
 	"time"
 
 	"github.com/aws/amazon-ecs-agent/agent/api"
+	"github.com/aws/amazon-ecs-agent/agent/config"
 	"github.com/aws/amazon-ecs-agent/agent/engine/dependencygraph"
 	"github.com/aws/amazon-ecs-agent/agent/utils/ttime"
+	"github.com/cihub/seelog"
 )
 
 const (
-	taskStoppedDuration           = 3 * time.Hour
 	steadyStateTaskVerifyInterval = 10 * time.Minute
 )
 
@@ -160,7 +161,7 @@ func (task *managedTask) overseeTask() {
 		llog.Debug("Marking done for this sequence", "seqnum", task.StopSequenceNumber)
 		task.engine.taskStopGroup.Done(task.StopSequenceNumber)
 	}
-	task.cleanupTask()
+	task.cleanupTask(task.engine.cfg.TaskCleanupWaitDuration)
 }
 
 func (mtask *managedTask) emitCurrentStatus() {
@@ -176,7 +177,7 @@ func (mtask *managedTask) handleDesiredStatusChange(desiredStatus api.TaskStatus
 	// acs says it should be if it is compatible
 	llog.Debug("New acs transition", "status", desiredStatus.String(), "seqnum", seqnum, "taskSeqnum", mtask.StopSequenceNumber)
 	if desiredStatus <= mtask.DesiredStatus {
-		llog.Debug("Redundant transition; ignoring", "old", mtask.DesiredStatus.String(), "new", desiredStatus.String())
+		llog.Debug("Redundant task transition; ignoring", "old", mtask.DesiredStatus.String(), "new", desiredStatus.String())
 		return
 	}
 	if desiredStatus == api.TaskStopped && seqnum != 0 && mtask.StopSequenceNumber == 0 {
@@ -223,7 +224,7 @@ func (mtask *managedTask) handleContainerChange(containerChange dockerContainerC
 		}
 	}
 	if event.Status <= container.KnownStatus {
-		llog.Info("Redundant status change; ignoring", "current", container.KnownStatus.String(), "change", event.Status.String())
+		seelog.Infof("Redundant container state change for task %s: %s to %s, but already %s", mtask.Task, container, event.Status, container.KnownStatus)
 		return
 	}
 	container.KnownStatus = event.Status
@@ -414,8 +415,15 @@ func (task *managedTask) progressContainers() {
 	task.UpdateStatus()
 }
 
-func (task *managedTask) cleanupTask() {
-	cleanupTime := ttime.After(task.KnownStatusTime.Add(taskStoppedDuration).Sub(ttime.Now()))
+func (task *managedTask) cleanupTask(taskStoppedDuration time.Duration) {
+	cleanupTimeDuration := task.KnownStatusTime.Add(taskStoppedDuration).Sub(ttime.Now())
+	// There is a potential deadlock here if cleanupTime is negative. Ignore the computed
+	// value in this case in favor of the default config value.
+	if cleanupTimeDuration < 0 {
+		log.Debug("Task Cleanup Duration is too short. Resetting to " + config.DefaultTaskCleanupWaitDuration.String())
+		cleanupTimeDuration = config.DefaultTaskCleanupWaitDuration
+	}
+	cleanupTime := ttime.After(cleanupTimeDuration)
 	cleanupTimeBool := make(chan bool)
 	go func() {
 		<-cleanupTime
@@ -426,9 +434,16 @@ func (task *managedTask) cleanupTask() {
 	}
 	log.Debug("Cleaning up task's containers and data", "task", task.Task)
 
-	// First make an attempt to cleanup resources
-	task.engine.sweepTask(task.Task)
-	task.engine.state.RemoveTask(task.Task)
+	// For the duration of this, simply discard any task events; this ensures the
+	// speedy processing of other events for other tasks
+	handleCleanupDone := make(chan struct{})
+	go func() {
+		task.engine.sweepTask(task.Task)
+		task.engine.state.RemoveTask(task.Task)
+		handleCleanupDone <- struct{}{}
+	}()
+	task.discardEventsUntil(handleCleanupDone)
+	log.Debug("Finished removing task data; removing from state no longer managing", "task", task.Task)
 	// Now remove ourselves from the global state and cleanup channels
 	task.engine.processTasks.Lock()
 	delete(task.engine.managedTasks, task.Arn)
@@ -442,6 +457,17 @@ func (task *managedTask) cleanupTask() {
 
 	close(task.dockerMessages)
 	close(task.acsMessages)
+}
+
+func (task *managedTask) discardEventsUntil(done chan struct{}) {
+	for {
+		select {
+		case <-task.dockerMessages:
+		case <-task.acsMessages:
+		case <-done:
+			return
+		}
+	}
 }
 
 func (task *managedTask) discardPendingMessages() {
